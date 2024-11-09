@@ -1,6 +1,7 @@
 import gymnasium as gym
 import numpy as np
 from psutil import IOPRIO_CLASS_BE
+import time
 
 
 def pre_process(image):
@@ -33,9 +34,12 @@ def roll_observation_buffer(I, I_buffer):
 
 class PongEnv(gym.Env):
 
-    def __init__(self, num_steps):
+    def __init__(self, num_steps, seed):
         super().__init__()
         self._env = gym.make("ALE/Pong-v5", disable_env_checker=True)
+        self.seed = seed
+        self.reset(seed=seed)
+        #self.action_space.seed(seed)
         self.num_steps = num_steps
         self.observation_space = self._env.observation_space
         self.action_space = self._env.action_space
@@ -45,7 +49,14 @@ class PongEnv(gym.Env):
         self.render_mode = self._env.render_mode
 
     def reset(self, **kwargs):
-        return self._env.reset( **kwargs)
+
+        obs, info = self._env.reset(**kwargs)
+
+        n = time.time_ns() % 30 # burn out as in the DQN paper
+        for i in range(n):
+            obs, reward, terminated, truncated, info = self._env.step(0)
+
+        return obs, info
 
     def close(self):
         return self._env.close()
@@ -59,6 +70,6 @@ class PongEnv(gym.Env):
             done = terminated or truncated
 
             if done:
-                obs, info = self._env.reset()
+                obs, info = self.reset()
 
         return obs, total_rewards, terminated, truncated, info

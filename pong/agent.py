@@ -2,7 +2,7 @@ from model import RLModel, pre_process
 from copy import deepcopy
 import numpy as np
 
-from pong.pong_env import roll_observation_buffer
+from pong_env import roll_observation_buffer
 
 
 class Agent:

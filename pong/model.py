@@ -82,7 +82,7 @@ def train(optimizer, envs_groups, agent, num_simu_steps, num_training_steps, seq
     agent.model.train()
     n_envs = envs_groups[0].num_envs
 
-    best_rewards_per_step = 5 # threshold
+    best_rewards_per_step = 0.0 # threshold, start saving
     rewards_ema = EmaVal()
     losses_ema = [EmaVal() for _ in range(3)]
 
@@ -121,7 +121,7 @@ def train(optimizer, envs_groups, agent, num_simu_steps, num_training_steps, seq
         t0 = time()
         with torch.inference_mode():
                 agent_states = simu.agent_states
-                if np.random.randint(500 // num_simu_steps) == 0:
+                if np.random.randint(5) == 0:
                     agent_states = agent.model.zero_state(n_envs)  # sometimes reset the agent RNN states randomly
 
                 new_run, last_obs_array, last_done_array, new_agent_states = \
@@ -210,8 +210,11 @@ def future_returns(rewards, dones, values, gamma):
     Rs = torch.zeros_like(rewards)
 
     # Bootstrap from the last value unless the episode is done
-    last_value = torch.where(dones[:, -1], torch.zeros_like(values[:, -1]), values[:, -1])
-    Rs[:, -1] = rewards[:, -1] + gamma * last_value
+    #last_value = torch.where(dones[:, -1], torch.zeros_like(values[:, -1]), values[:, -1])
+    #Rs[:, -1] = rewards[:, -1] + gamma * last_value
+
+    last_value = torch.where(dones[:, -1], rewards[:, -1], values[:, -1])
+    Rs[:, -1] = last_value
 
     # Backwards value iteration
     for t in range(T - 2, -1, -1):  # Work backwards from T-2 to 0
@@ -467,8 +470,8 @@ if __name__ == "__main__":
     gym.register_envs(ale_py)
 
     # parallelization parameters
-    batch_size = 8 # batch-size (keep it low if cpu only)
-    env_groups = 8 # separate group of environments to alternative and avoid overfitting one history, too high will be off-policy
+    batch_size = 16 # batch-size (keep it low if cpu only)
+    env_groups = 1 # separate group of environments to alternative and avoid overfitting one history, too high will be off-policy
     num_steps = 15 # num steps so simulate in one group between each gradient descent step
 
     num_training_steps = 100_000
@@ -476,7 +479,7 @@ if __name__ == "__main__":
     agent =  Agent(None)
 
     # This option goes with env.step in run many, faster on my thinkpad laptop
-    env_groups = [gym.vector.AsyncVectorEnv([lambda : PongEnv(num_steps=agent.n_action_repeat) for i in range(batch_size)]) for _ in range(env_groups)]
+    env_groups = [gym.vector.AsyncVectorEnv([lambda : PongEnv(num_steps=agent.n_action_repeat, seed=i + batch_size * i_g) for i in range(batch_size)]) for i_g in range(env_groups)]
 
     # This option goes with async_multi_step
     #envs = gym.make_vec("ALE/Pong-v5", num_envs=batch_size, vectorization_mode="async")
