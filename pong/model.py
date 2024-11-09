@@ -72,9 +72,9 @@ def run_many(envs, agent, num_steps, last_obs_array, last_done_array, agent_stat
     return (observations, rewards, values, logits, dones, actions,), \
         last_obs_array, last_done_array, agent_states
 
-def train(optimizer, envs_groups, agent, num_simu_steps, num_training_steps, seq_len=30, n_target_updates=25, n_prints=100):
+def train(optimizer, envs_groups, agent, num_simu_steps, num_training_steps, run_stack_size=2, n_target_updates=25, n_prints=100):
 
-    run_stack_size = seq_len // num_simu_steps # 60 will be the number of RNN steps
+    #run_stack_size = seq_len // num_simu_steps # 60 will be the number of RNN steps
     #if n_target_updates is None: n_target_updates = len(env_groups) * run_stack_size
     n_prints = min(n_prints, num_training_steps)
     n_target_updates = min(n_target_updates, n_prints)
@@ -472,7 +472,7 @@ if __name__ == "__main__":
     # parallelization parameters
     batch_size = 16 # batch-size (keep it low if cpu only)
     env_groups = 1 # separate group of environments to alternative and avoid overfitting one history, too high will be off-policy
-    num_steps = 15 # num steps so simulate in one group between each gradient descent step
+    num_steps = 20 # num steps so simulate in one group between each gradient descent step
 
     num_training_steps = 100_000
 
@@ -484,8 +484,8 @@ if __name__ == "__main__":
     # This option goes with async_multi_step
     #envs = gym.make_vec("ALE/Pong-v5", num_envs=batch_size, vectorization_mode="async")
 
-    optimizer = torch.optim.AdamW(agent.model.parameters(), lr=1e-4)
-    train(optimizer, env_groups, agent, num_steps, num_training_steps=num_training_steps)
+    optimizer = torch.optim.AdamW(agent.model.parameters(), lr=1e-3)
+    train(optimizer, env_groups, agent, num_steps, num_training_steps=num_training_steps, run_stack_size=1)
 
     agent.model.save()
     print(f"saved agent for {num_training_steps}")
