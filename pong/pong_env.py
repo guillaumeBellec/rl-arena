@@ -2,7 +2,38 @@ import gymnasium as gym
 import numpy as np
 from psutil import IOPRIO_CLASS_BE
 import time
+import cv2
 
+
+def preprocess_frame(frames):
+    """
+        Preprocess a batch of frames
+        Input shape: (batch_size, height, width, channels)
+        Output shape: (batch_size, 1, 84, 84)
+        """
+
+    if len(frames.shape) == 3:
+        return preprocess_frame(frames[None, ...])[0]
+
+    frames = frames[:, ::2, ::2, :] # rapid down sampling
+
+    if frames.shape[1:] == [84, 84,1]:
+        return frames # nothing to change
+
+    batch_size = frames.shape[0]
+    processed = np.zeros((batch_size, 1, 84, 84), dtype=np.float32)
+
+    for i in range(batch_size):
+        # Convert to grayscale
+        gray = cv2.cvtColor(frames[i], cv2.COLOR_RGB2GRAY)
+
+        # Resize to 84x84
+        resized = cv2.resize(gray, (84, 84), interpolation=cv2.INTER_AREA)
+
+        # Normalize and add channel dimension
+        processed[i, 0] = resized / 255.0
+
+    return processed
 
 def pre_process(image):
     if len(image.shape) == 3:
@@ -17,19 +48,6 @@ def pre_process(image):
     # fast cpu downscaling
     I = np.maximum(np.maximum(Is[0], Is[1]), np.maximum(Is[2], Is[3]))
     return I.astype(np.uint8)
-
-def roll_observation_buffer(I, I_buffer):
-    assert len(I.shape) == len(I_buffer.shape)-1
-
-    if isinstance(I_buffer, list):
-        I_buffer = np.concatenate(I_buffer, axis=1)
-
-    if len(I_buffer.shape) == 4: # d, W, H, C
-        I = I[None, ...]
-        I_buffer = I_buffer[None, ...]
-        return roll_observation_buffer(I, I_buffer)[0]
-
-    return np.concatenate([I_buffer[:,:-1], I[:, None]], axis=1)
 
 
 class PongEnv(gym.Env):

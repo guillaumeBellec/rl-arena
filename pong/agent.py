@@ -1,12 +1,15 @@
-from model import RLModel, pre_process
+from model import RLModel
 from copy import deepcopy
 import numpy as np
+from datetime import datetime
 
-from pong_env import roll_observation_buffer
+from pong.pong_env import preprocess_frame
 
 
 class Agent:
     def __init__(self, env):
+
+        self.name = "agent_ppo_" + datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
 
         self.model = RLModel(lambda : self.get_target_network()) # also initialize to zero_state
 
@@ -40,11 +43,11 @@ class Agent:
         if self.repeat_cycle > 0:
             return self.last_action
 
-        I = pre_process(observation) # downscale image !
+        I = preprocess_frame(observation) # downscale image !
         if self.observation_buffer is None:
             assert self.is_first_inference # init if there is not previous history
             self.observation_buffer = np.stack([I for _ in range(self.model.n_observation_buffer)], 1)
-        self.observation_buffer = roll_observation_buffer(I, self.observation_buffer)
+        self.observation_buffer = self.model.roll_observation_buffer(I, self.observation_buffer)
 
         last_done = self.is_first_inference
         action, _, _, self.states = self.model.action_selection(self.observation_buffer, [last_done], self.states)

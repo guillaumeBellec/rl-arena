@@ -9,6 +9,8 @@ def eval(env, agent_cls):
     observation, info = env.reset(seed=42)
 
     total_rewards = []
+    reward_per_step = []
+
     for episode in range(10):
         total_reward = 0
         observation, *_ = env.reset()

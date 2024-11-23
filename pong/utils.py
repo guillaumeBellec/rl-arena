@@ -5,6 +5,21 @@ import numpy as np
 from collections import deque
 from dataclasses import dataclass
 
+def to_torch(tensor):
+    if isinstance(tensor, list):
+        return [to_torch(t) for t in tensor]
+
+    if isinstance(tensor, tuple):
+        return tuple([to_torch(t) for t in tensor])
+
+    if isinstance(tensor, dict):
+        return dict([(k,to_torch(v)) for k, v in tensor.items()])
+
+    if isinstance(tensor, np.ndarray):
+        tensor = torch.from_numpy(tensor)
+
+    return tensor
+
 def make_vgg_layers(cfg: List[Union[str, int]], in_channels=3, batch_norm: bool = False) -> nn.Sequential:
     layers: List[nn.Module] = []
     for v in cfg:
@@ -20,6 +35,17 @@ def make_vgg_layers(cfg: List[Union[str, int]], in_channels=3, batch_norm: bool 
             in_channels = v
     return nn.Sequential(*layers)
 
+def to_scalar(val):
+    if isinstance(val, torch.Tensor):
+        val = float(torch.mean(val).item())
+
+    if isinstance(val, np.ndarray):
+        return float(np.mean(val))
+
+    if np.isscalar(val):
+        return val
+
+    raise NotImplementedError()
 
 class EmaVal:
 
@@ -66,6 +92,9 @@ def deepclone(tensor):
     if np.isscalar(tensor):
         return tensor
 
+    if tensor is None:
+        return None
+
     raise NotImplemented()
 
 
@@ -91,47 +120,7 @@ def deepdetach(tensor):
     if np.isscalar(tensor):
         return tensor
 
-    raise NotImplemented()
-
-
-
-class RunStack:
-
-    def __init__(self, max_len):
-        self._deque = deque(maxlen=max_len)
-
-    def add(self, runs):
-        self._deque.append(deepdetach(runs))
-
-    def convert_to_torch(self, tensor):
-        if not isinstance(tensor, np.ndarray): raise NotImplementedError()
-
-        tensor = torch.from_numpy(tensor)
-        if tensor.is_inference():
-            tensor = tensor.clone()
-
+    if tensor is None:
         return tensor
 
-    def get_stack_tensors(self):
-        runs = list(self._deque)
-        first_run = runs[0]
-        assert isinstance(first_run, tuple)
-
-        data_lists = [[] for _ in range(len(first_run))]
-        for i in range(len(first_run)):
-            for run in runs:
-                data_lists[i].append(run[i])
-
-        data_tensors = [np.concatenate(l, 1) for l in data_lists]
-
-        data_torch_tensors = [self.convert_to_torch(arr) for arr in data_tensors]
-
-        return tuple(data_torch_tensors)
-
-@dataclass
-class Simulation:
-    envs: any
-    agent_states: any
-    last_observations: any
-    last_dones : any
-    run_stack: any
+    raise NotImplemented()
