@@ -9,7 +9,7 @@ def eval(env, agent_cls):
     observation, info = env.reset(seed=42)
 
     total_rewards = []
-    reward_per_step = []
+    reward_list = []
 
     for episode in range(10):
         total_reward = 0
@@ -20,6 +20,7 @@ def eval(env, agent_cls):
 
             observation, reward, terminated, truncated, info = env.step(action)
             total_reward += reward
+            reward_list.append(reward)
 
             if terminated or truncated:
                 break
@@ -27,15 +28,15 @@ def eval(env, agent_cls):
 
         total_rewards += [total_reward]
 
-    return total_rewards
+    return total_rewards, float(np.mean(reward_list))
 
 
 if __name__ == "__main__":
 
     env = gym.make("LunarLander-v2", render_mode="human")
-    total_rewards = eval(env, Agent)
-    print(total_rewards)
+    total_rewards, rewards_per_step = eval(env, Agent)
 
     print(f"total rewards: {np.mean(total_rewards)} +- {np.std(total_rewards)}")
+    print(f"rewards per step: {rewards_per_step}")
 
     env.close()

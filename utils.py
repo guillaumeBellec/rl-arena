@@ -4,8 +4,106 @@ from typing import List,Union, Any, Optional, cast
 import numpy as np
 from collections import deque
 from dataclasses import dataclass, is_dataclass, fields
+from torch.nn.functional import relu
+import argparse
+from pathlib import Path
+import json
+import math
 
 from typing import Any, Dict, List, Tuple, Union, Callable
+
+
+def save_args_to_json(args, filepath):
+    """
+    Save argparse arguments to a JSON file
+
+    Args:
+        args: Parsed argument object from ArgumentParser
+        filepath: Path to save the JSON file
+    """
+    # Convert args to dictionary
+    args_dict = vars(args)
+
+    # Create directory if it doesn't exist
+    Path(filepath).parent.mkdir(parents=True, exist_ok=True)
+
+    # Save to JSON
+    with open(filepath, 'w') as f:
+        json.dump(args_dict, f, indent=4)
+
+
+def load_args_from_json(filepath, parser=None):
+    """
+    Load arguments from JSON file
+
+    Args:
+        filepath: Path to the JSON file
+        parser: Optional ArgumentParser object to verify arguments
+
+    Returns:
+        Namespace object with loaded arguments
+    """
+    with open(filepath, 'r') as f:
+        args_dict = json.load(f)
+
+    if parser is not None:
+        # Parse dict through ArgumentParser to validate arguments
+        args = parser.parse_args([])  # Create empty args
+        for key, value in args_dict.items():
+            setattr(args, key, value)
+        return args
+    else:
+        # Convert directly to Namespace
+        return argparse.Namespace(**args_dict)
+
+class RegressionAsClassificationLoss(nn.Module):
+
+    def __init__(self, nbins :int=1024, scale:float=50, sigma:float=0.1, one_sided=False, circular=False):
+        super().__init__()
+        vmax = scale #* (1 + sigma)
+        self.vmax = vmax
+        self.vmin = - np.abs(vmax - scale) if one_sided else -vmax
+        self.nbins = nbins
+        self.vwidth = (self.vmax - self.vmin) * sigma
+        #self.bounds = np.arange(nbins) * (self.vmax - self.vmin) / nbins + self.vmin
+        self.centers = np.arange(nbins) * (self.vmax - self.vmin) / nbins + self.vmin
+        self.dkl = nn.KLDivLoss(reduction="batchmean")
+        if circular: raise NotImplementedError()
+
+    def target_to_distrib(self, target):
+        if len(target.shape) > 1:
+            shp = target.shape
+            out_shp = list(shp) + [self.nbins]
+            return self.target_to_distrib(target.flatten()).reshape(out_shp)
+
+        w = self.vwidth
+
+        # triangle:
+        mass_overlap = relu(w - torch.abs(target[:, None] - self.centers[None, :]))
+        distrib = mass_overlap / mass_overlap.sum(dim=1, keepdim=True)
+        return distrib
+
+    def value_from_logits(self, logits):
+        if isinstance(logits, np.ndarray):
+            return to_numpy(self.value_from_logits(to_torch(logits)))
+
+        d = torch.softmax(logits, dim=-1)
+        return self.expected_value(d)
+
+    def expected_value(self, distrib):
+        assert distrib.shape[-1] == self.nbins, f"expected n={self.nbins}  got shape: {distrib.shape}"
+        return (distrib * self.centers).sum(-1)
+
+    def forward(self, logits, target):
+        assert logits.shape[-1] == self.nbins, f"expected n={self.nbins} got shape: {logits.shape} - target: {target.shape}"
+        if not target.max() <= self.vmax: print(f"warning: RACL got target {target.shape} with max {target.max()}")
+        if not target.min() >= self.vmin: print(f"warning: RACL got target {target.shape} with min {target.min()}")
+        target = target.clip(min=self.vmin, max=self.vmax)
+        distrib = self.target_to_distrib(target)
+        log_probs = nn.functional.log_softmax(logits, dim=-1)
+        #probs = torch.softmax(logits, dim=1)
+
+        return self.dkl(log_probs, distrib)
 
 
 def make_deep(fn: Callable) -> Callable:
@@ -71,6 +169,8 @@ def make_deep_for_lists(fn: Callable) -> Callable:
             return batch
 
         sample = batch[0]
+        for i in range(len(batch)):
+            assert type(batch[i]) == type(sample), f"got item {i} of type {type(batch[i])} but sample is {type(sample)}. batch shapes are: {deepshape(batch)}"
 
         if isinstance(sample, torch.Tensor):
             return fn(batch, *args, **kwargs)
@@ -132,8 +232,10 @@ def _to_numpy_single_element(tensor):
 to_numpy = make_deep(_to_numpy_single_element)
 
 
-deepstack = make_deep_for_lists(torch.stack)
-deepconcatenate = make_deep_for_lists(torch.concatenate)
+deep_torch_stack = make_deep_for_lists(torch.stack)
+deep_np_stack = make_deep_for_lists(np.stack)
+deep_torch_concatenate = make_deep_for_lists(torch.concatenate)
+deep_np_concatenate = make_deep_for_lists(np.concatenate)
 
 
 def make_vgg_layers(cfg: List[Union[str, int]], in_channels=3, batch_norm: bool = False) -> nn.Sequential:
@@ -173,14 +275,15 @@ class EmaVal:
         if self._val is None: return -1.0
         return self._val
 
-
     def __call__(self, val):
         if isinstance(val, torch.Tensor):
+            if torch.any(torch.isnan(val)): raise NotImplementedError()
             val = float(torch.mean(val).item())
 
         if self._val is not None:
             assert np.isscalar(self._val), f"unexpected type: {type(self._val)}: {self._val}"
 
+        if np.isnan(val): return self._val # do nothing
         if self._val is None: self._val = val # no value stored, overwritten memory
         self._val = self.d * self._val + (1-self.d) * float(val)
         return self._val
@@ -190,6 +293,21 @@ deepclone = make_deep(torch.clone)
 deepdetach = make_deep(torch.detach)
 
 deeppermute = make_deep(torch.permute)
+
+def truncation(tensors, start, stop, dim=0) -> torch.Tensor:
+    if dim != 0:
+        perm = list(range(len(tensors.shape)))
+        perm[0] = dim
+        perm[dim] = 0
+        if isinstance(tensors, np.ndarray):
+            return truncation(tensors.transpose(perm), start, stop).transpose(perm)
+        elif isinstance(tensors, torch.Tensor):
+            return truncation(tensors.permute(perm), start, stop).permute(perm)
+        raise NotImplementedError()
+
+    return tensors[start:stop]
+
+deeptruncation = make_deep(truncation)
 
 @DeprecationWarning
 class ReplayBuffer:
@@ -265,20 +383,45 @@ class ReplayBuffer:
 
 
 def _single_shape(tensor):
+    if isinstance(tensor, str): return tensor
+    if np.isscalar(tensor): return tensor
     return tensor.shape
 
 deepshape = make_deep(_single_shape)
 
+def positionalencoding1d(d_model, length):
+    """
+    :param d_model: dimension of the model
+    :param length: length of positions
+    :return: length*d_model position matrix
+    """
+    if d_model % 2 != 0:
+        raise ValueError("Cannot use sin/cos positional encoding with "
+                         "odd dim (got dim={:d})".format(d_model))
+    pe = torch.zeros(length, d_model)
+    position = torch.arange(0, length).unsqueeze(1)
+    div_term = torch.exp((torch.arange(0, d_model, 2, dtype=torch.float) *
+                         -(math.log(10000.0) / d_model)))
+    pe[:, 0::2] = torch.sin(position.float() * div_term)
+    pe[:, 1::2] = torch.cos(position.float() * div_term)
+
+    return pe
+
 # run as main
 if __name__ == "__main__":
+    import matplotlib.pyplot as plt
+    values = torch.tensor([-10, 0.1, 0.12, 0.2, 10], dtype=torch.float)
+    scale = 10.
+    vales = values / scale
+    L = RegressionAsClassificationLoss()
 
-    make_data = lambda i : torch.arange(i,i+10)
+    d = L.target_to_distrib(values)
+    values_ = L.expected_value(d)
 
-    examples = [{
-        "my_key": (make_data(i), make_data(i))
-    }
-    for i in range(4)
-    ]
+    fig, ax_list = plt.subplots(len(values))
+    for i, ax, in enumerate(ax_list):
+        print(f"{values[i]} -> {values_[i]}")
+        ax.bar(x=L.centers, height=d[i])
 
-    results = deepstack(examples)
-    print(results)
+    plt.show()
+

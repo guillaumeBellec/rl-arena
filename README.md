@@ -1,1 +1,1 @@
-# rl-arena
+# ML Arena with PPO
