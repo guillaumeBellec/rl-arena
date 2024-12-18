@@ -57,8 +57,8 @@ class Agent:
             model_state=to_torch(self._state.model_state),
         )
 
+        self._state.extended_action_buffer.add(action.detach().cpu().numpy())
         self._state.model_state = to_numpy(model_state)
         self._state.last_is_done = np.array([False], dtype=bool) # never true again at run time
-
 
         return int(action.squeeze())

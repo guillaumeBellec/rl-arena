@@ -68,9 +68,8 @@ class Agent:
         last_done = self.state.last_is_done
         obs_array = self.state.observation_buffer.numpy_stack()
         action, _, _, final_model_state = self.model.action_selection(obs_array, last_done, self.state.model_state)
-        self.state.observation_buffer.add(action.detach().cpu().numpy())
 
+        self.state.extended_action_buffer.add(action.detach().cpu().numpy())
         self.state.model_state = final_model_state
-
         self.state.last_is_done = np.array([False])
         return int(action.squeeze().item())

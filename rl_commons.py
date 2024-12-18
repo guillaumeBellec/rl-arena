@@ -47,11 +47,17 @@ class ObservationBuffer:
 
     def reset_if_true(self, is_done):
         if not any(is_done): return
+
         assert len(self._deque) == self.size
         assert len(is_done.shape) == 1
-        for i in range(self.size):
-            if is_done[i]:
-                self._deque[i] = np.zeros_like(self._deque[i])
+
+        # unsqueeze until it's compatible
+        while len(is_done.shape) < len(self._deque[0].shape):
+            is_done = is_done[..., None]
+
+        zz = np.zeros_like(self._deque[0])
+        for i in range(self.size): # run over delays
+            self._deque[i] = np.where(is_done, zz, self._deque[i]) #inplace assignment in numpy array. np.zeros_like(self._deque[i][b])
 
     def make_buffer_dimension(self, tensor):
         B, T, *_ = tensor.shape

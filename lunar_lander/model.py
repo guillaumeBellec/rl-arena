@@ -83,8 +83,8 @@ if __name__ == "__main__":
     parser.add_argument('--returns_saving_thr', type=float, default=200.)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--lbda', type=float, default=0.93) # for ppo
-    parser.add_argument('--alpha', type=float, default=0.001) #
-    parser.add_argument('--lr', type=float, default=1e-5) #
+    parser.add_argument('--alpha', type=float, default=0.01) #
+    parser.add_argument('--lr', type=float, default=1e-4) #
 
     parser.add_argument('--n_learner_steps', type=int, default=10)
     parser.add_argument('--learner_batch_size', type=int, default=64)
