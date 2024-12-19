@@ -20,7 +20,7 @@ from torch.distributions.categorical import Categorical
 from torch.nested import nested_tensor
 
 from utils import to_torch, deep_torch_stack, deepshape, to_numpy, deepdetach, deeptruncation, deep_torch_concatenate, \
-    deeppermute, \
+    deeppermute, make_deep, \
     EmaVal, to_scalar, deep_np_concatenate, RegressionAsClassificationLoss, save_args_to_json
 
 import random
@@ -80,6 +80,7 @@ class ObservationBuffer:
 
     def add(self, observation):
         assert observation.shape[1:] == self.shp, f"got shape {observation.shape} expected {self.shp}"
+
         if len(self._deque) == 0:
             for i in range(self.size-1): # file with first element at first.
                 self._deque.append(observation)
@@ -97,7 +98,7 @@ class AgentState:
     observation_buffer: ObservationBuffer
     extended_action_buffer: ObservationBuffer
     #last_obs_array : any
-    last_is_done: any
+    step_count: any
     model_state: any
     accumulated_rewards : np.ndarray
 
@@ -166,8 +167,8 @@ class Simulation:
             return self.envs.reset(**kwargs)
 
     @torch.inference_mode()
-    def run_many(self, num_steps : int, num_learner_steps : int):
-        profile = False
+    def run_many(self, num_steps : int, num_learner_steps : int, profile=False):
+
         agent = self.agent
         envs = self.envs
         agent_state : AgentState = self.agent_state
@@ -181,9 +182,9 @@ class Simulation:
         rewards = np.zeros([n_envs, num_steps], dtype=np.float32)
         values = np.zeros([n_envs, num_steps, agent.model.value_model_dim], dtype=np.float32)
         logits = np.zeros([n_envs, num_steps, agent.model.num_actions], dtype=np.float32)
-        dones = np.zeros([n_envs, num_steps], dtype=bool)
+        step_counts = np.zeros([n_envs, num_steps], dtype=bool)
         actions = np.zeros([n_envs, num_steps], dtype=np.int64)
-        last_actions = np.zeros([n_envs, num_steps, agent.model.n_observation_buffer], dtype=np.int64)
+        last_extended_actions = np.zeros([n_envs, num_steps, agent.model.n_observation_buffer], dtype=np.int64)
         returns_at_done = np.zeros([n_envs, num_steps], dtype=np.float32)
 
         dt_actions = []
@@ -191,18 +192,21 @@ class Simulation:
         dt_stacks = []
 
         for t in range(num_steps):
+
             t0 = time()
 
             if t % num_learner_steps == 0:
                 agent_state_list += [deepcopy(to_numpy(agent_state))]
 
+            action_buffer = agent_state.extended_action_buffer.numpy_stack()
+            obs_buffer = agent_state.observation_buffer.numpy_stack()
+
             chosen_actions, l, predicted_values, new_model_state = agent.model.action_selection(
-                agent_state.observation_buffer.numpy_stack(),
-                agent_state.last_is_done,
-                agent_state.extended_action_buffer.numpy_stack(),
+                obs_buffer,
+                agent_state.step_count,
+                action_buffer,
                 to_torch(agent_state.model_state),
             )
-
             chosen_actions = chosen_actions.detach().cpu().numpy()
 
             t_action = time()
@@ -211,19 +215,20 @@ class Simulation:
             new_I = agent.preprocess_frame(new_I) # possible downscaling
             is_done = np.logical_or(terminated, truncated)
             accumulated_rewards = agent_state.accumulated_rewards + reward # add current reward
+            step_count = np.where(is_done, np.zeros_like(agent_state.step_count), agent_state.step_count +1)
 
             t_envs = time()
 
 
             assert observations.dtype == new_I.dtype # be careful this would create a silent casting otherwise.
             # TODO: Could add only last instead of entire buffer... not sure if it's worth it
-            observations[:,t] = agent_state.observation_buffer.numpy_stack() #last_obs_list # store last element in buffer
+            observations[:,t] = obs_buffer #last_obs_list # store last element in buffer
             rewards[:,t] = reward
             values[:,t] = predicted_values #.squeeze(-1) if len(predicted_values.shape) == 2 else predicted_values
             logits[:,t] = l.detach().cpu().numpy()
-            dones[:,t] = is_done
+            step_counts[:,t] = step_count
             actions[:,t] = chosen_actions
-            last_actions[:, t] = agent_state.extended_action_buffer.numpy_stack()
+            last_extended_actions[:, t] = action_buffer
             returns_at_done[:,t] = np.where(is_done, accumulated_rewards, np.nan * accumulated_rewards)
 
             # for the next step
@@ -233,15 +238,14 @@ class Simulation:
             dt_envs += [t_envs - t_action]
             dt_stacks += [t_stack - t_envs]
 
-            # for next
+            # update agent state for next step
             accumulated_rewards =  np.where(is_done, np.zeros_like(accumulated_rewards), accumulated_rewards)
 
-            # update agent state
             agent_state.extended_action_buffer.add(chosen_actions + 1) # 0 means non-existing action (reset)
             agent_state.extended_action_buffer.reset_if_true(is_done)
-            agent_state.observation_buffer.reset_if_true(is_done) # reset is before new state for obs
-            agent_state.observation_buffer.add(new_I) #
-            agent_state.last_is_done = to_numpy(is_done)
+            agent_state.observation_buffer.reset_if_true(is_done) #
+            agent_state.observation_buffer.add(new_I) # add after reset, if obs comes from env.reset()
+            agent_state.step_count = step_count
             agent_state.model_state = to_numpy(new_model_state)
             agent_state.accumulated_rewards = accumulated_rewards
 
@@ -251,11 +255,11 @@ class Simulation:
 
         RACL = RegressionAsClassificationLoss()
         value_val = RACL.value_from_logits(values) if agent.model.value_model_dim > 1 else values.squeeze(-1)
-        returns = future_returns(rewards, dones, value_val, self.gamma)
-        adv = generalized_advantage(rewards, dones, value_val, self.gamma, self.lbda)
+        returns = future_returns(rewards, step_counts == 0, value_val, self.gamma)
+        adv = generalized_advantage(rewards, step_counts == 0, value_val, self.gamma, self.lbda)
 
         # these are all the data tensors:
-        tensors = to_numpy( (observations, rewards, values, logits, dones, actions, returns, adv, last_actions, returns_at_done) )
+        tensors = to_numpy( (observations, rewards, values, logits, step_counts, actions, returns, adv, last_extended_actions, returns_at_done) )
 
         # record new state for later
         self.agent_state = to_numpy(agent_state)
@@ -345,6 +349,28 @@ def generalized_advantage(rewards, dones, values, gamma, lbda):
 
     return advantages
 
+class MyRandomMask(nn.Module):
+
+    def __init__(self, p0=0.1, p_apply=0.5):
+        super().__init__()
+        self.p0 = p0
+        self.p_apply = p_apply
+
+        def fun(x):
+            p_eff = np.random.rand() * self.p0
+            if isinstance(x, torch.Tensor):
+                x = torch.where(torch.rand_like(x.float()) > p_eff, x, torch.zeros_like(x))
+            else:
+                raise NotImplementedError(f"got type: {type(x)} for x={x}")
+            return x
+
+        self.apply = make_deep(fun)
+
+    def forward(self, x):
+        if not self.training: return x
+        if np.random.random() > self.p_apply: return x
+
+        return self.apply(x)
 
 class MyBatchNorm(nn.Module):
 
@@ -484,6 +510,7 @@ class RLModel(nn.Module):
         self.value_model_dim = 1 #RegressionAsClassificationLoss().nbins if args.racl else 1
         self.is_done_embedding = nn.Embedding(1, self.embed_dim)
         self.action_embedding = nn.Embedding((self.num_actions+1) * self.n_observation_buffer, self.embed_dim)
+        self.random_input_mask = MyRandomMask()
 
         def make_model(n_ins, n_out):
             return MLPModel(n_ins, n_out) # RNNModel(n_ins, n_out)
@@ -523,17 +550,22 @@ class RLModel(nn.Module):
         #return (self.policy_model.zero_state(batch_size), self.Q_model.model.zero_state(batch_size))
 
     @torch.inference_mode()
-    def action_selection(self, obs_array, done_array, last_extended_actions, model_state):
+    def action_selection(self, obs_array, step_count, last_extended_actions, model_state):
 
         # un-squeeze dimension: expected no time dimension
         obs_array = obs_array[:,None]
-        done_array = done_array[:,None]
+        step_count = step_count[:, None]
 
         # logits, values, final_states = self.forward(obs_array, done_array, agent_state.model_state, True)
 
         net = self.get_target_network_fn()
         assert not net.training # target network is always in eval()
-        logits, values, final_states = net.forward(obs_array, done_array, last_extended_actions, model_state)
+        logits, values, final_states = net.forward(
+            obs_array,
+            step_counts=step_count,
+            last_extended_actions=last_extended_actions,
+            model_state=to_torch(model_state)
+        )
 
         if not self.deterministic:
             action = Categorical(logits=logits).sample()
@@ -552,9 +584,14 @@ class RLModel(nn.Module):
         model_state = agent_states.model_state
         tnet = self.get_target_network_fn()
 
-        (observations, rewards, value_old, logits_old, dones, actions, Rs, A, last_actions, _) = mini_batch_tensors
+        (observations, rewards, value_old, logits_old, step_counts, actions, Rs, A, last_ext_actions, _) = mini_batch_tensors
 
-        logits, values_trainable, final_state = self.forward(observations, dones, last_actions, model_state)
+        logits, values_trainable, final_state = self.forward(
+            obs_array=observations,
+            step_counts=step_counts,
+            last_extended_actions=last_ext_actions,
+            model_state=model_state
+        )
         #logits, final_policy_state = self.policy_model((observations, dones), model_state["policy"])
         #values_trainable, final_value_state = self.value_model((observations, dones), model_state["value"])
 
@@ -675,25 +712,32 @@ class RLModel(nn.Module):
         else:
             print(f"Warnings: file {file_name} not found dir has: {dirs}")
 
-    def context_embedding(self, done_array, last_extended_action):
-        B, T = done_array.shape
+    def context_embedding(self, step_counts, last_extended_actions):
+        B, T = step_counts.shape
+
+        done_array = step_counts == 0
         done_array = to_torch(done_array).reshape(B, T,).int()  # make time dim
-        last_extended_action = to_torch(last_extended_action).reshape(B, T, self.n_observation_buffer).int()  # make time dim
+        d = self.action_embedding.embedding_dim
+
+        last_extended_actions = to_torch(last_extended_actions).reshape(B, T, self.n_observation_buffer).int()  # make time dim
         n_extended_actions = self.num_actions + 1 # start is not an action
-        assert last_extended_action.min() >= 0
-        assert last_extended_action.max() < n_extended_actions
+        assert last_extended_actions.min() >= 0
+        assert last_extended_actions.max() < n_extended_actions
 
         # TODO: vectorize this for loop
         context = self.is_done_embedding.weight * done_array[..., None]
 
         for i in range(self.n_observation_buffer):
-            context += self.action_embedding(last_extended_action[:, :, i] + i * n_extended_actions)
+            context += self.action_embedding(last_extended_actions[:, :, i] + i * n_extended_actions)
 
         return context
 
-    def forward(self, obs_array, done_array, last_extended_actions, model_state):
-        context = self.context_embedding(done_array, last_extended_actions)
+    def forward(self, obs_array, step_counts, last_extended_actions, model_state):
+
+        last_extended_actions = self.random_input_mask(last_extended_actions)
+        context = self.context_embedding(step_counts, last_extended_actions)
         x = (obs_array, context)
+        x = self.random_input_mask(x)
         logits, final_policy_state = self.policy_model(x, model_state["policy"])
         values, final_value_state = self.value_model(x, model_state["value"])
 

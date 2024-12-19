@@ -407,6 +407,78 @@ def positionalencoding1d(d_model, length):
 
     return pe
 
+class PositionEncoding(nn.Module):
+
+    def __init__(self, d_model, max_len=3000):
+        super().__init__()
+        self.max_len = max_len
+        self.register_buffer('pe', positionalencoding1d(d_model, max_len))
+
+    def forward_using_zero_times(self, times):  # shape: B,T
+        """
+        Optimized positional encoding lookup that takes advantage of ascending sequences.
+        Uses slicing where possible instead of individual index lookups.
+
+        Args:
+            times: Tensor of shape (B,T) containing incrementing time indices that may reset to 0
+
+        Returns:
+            Tensor of shape (B,T,d) containing the positional encodings
+        """
+        B, T = times.shape
+        device = times.device
+
+        # Initialize output tensor
+        x = torch.zeros((B, T, self.pe.shape[1]), device=device)
+
+        # Process each sequence in the batch
+        for b in range(B):
+            # Find positions where sequence resets (diff < 0)
+            diffs = times[b, 1:] - times[b, :-1]
+            reset_positions = torch.where(diffs < 0)[0]
+
+            # Add start and end positions to process each continuous segment
+            segment_starts = torch.cat([torch.tensor([0], device=device), reset_positions + 1])
+            segment_ends = torch.cat([reset_positions, torch.tensor([T], device=device)])
+
+            # Process each continuous segment
+            for start, end in zip(segment_starts, segment_ends):
+                start_time = times[b, start]
+                length = end - start
+                x[b, start:end] = self.pe[start_time:start_time + length]
+
+        return x
+
+    def forward_using_scatter(self, times):  # shape: B,T
+        """
+        Look up positional encodings for given time sequences that may wrap around.
+
+        Args:
+            times: Tensor of shape (B,T) containing time indices that may reset to 0
+
+        Returns:
+            Tensor of shape (B,T,d) containing the positional encodings
+        """
+
+        # Convert to proper index type
+        times = times.long()
+
+        # Gather positional encodings for each time index
+        # pe[times] will broadcast across batch dimension
+        # Output shape will be (B,T,d)
+        x = self.pe[times]
+
+        return x
+
+    def forward(self, times):
+
+        times = times.clip(max=self.pe.shape[0])  # pe shape is (3000, 64)
+        ratio = (times == 0).int().sum() / max(1,times.numel())
+        cond = False # ratio < 0.1
+        if cond: return self.forward_using_zero_times(times)
+        else: return self.forward_using_scatter(times)
+
+
 # run as main
 if __name__ == "__main__":
     import matplotlib.pyplot as plt

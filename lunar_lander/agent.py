@@ -33,7 +33,7 @@ class Agent:
 
     def zero_state(self, batch_size):
         return AgentState(
-            last_is_done=np.array([True for _ in range(batch_size)]), # TODO: Put time with embedding instead?
+            step_count=np.zeros(batch_size, dtype=np.int64), # TODO: Put time with embedding instead?
             observation_buffer=ObservationBuffer.init(self.model.observation_shape,maxlen=self.model.n_observation_buffer, batch_size=batch_size, dtype=np.float32),
             extended_action_buffer=ObservationBuffer.init([], maxlen=self.model.n_observation_buffer, batch_size=batch_size, dtype=np.int64),
             model_state=self.model.zero_state(batch_size),
@@ -52,13 +52,13 @@ class Agent:
 
         action, _, _, model_state = self.model.action_selection(
             obs_array=self._state.observation_buffer.numpy_stack(), #self._state.last_obs_array,
-            done_array=self._state.last_is_done,
+            step_count=self._state.step_count,
             last_extended_actions=self._state.extended_action_buffer.numpy_stack(),
             model_state=to_torch(self._state.model_state),
         )
 
-        self._state.extended_action_buffer.add(action.detach().cpu().numpy())
+        self._state.extended_action_buffer.add(action.detach().cpu().numpy() + 1) # 0 means reset
         self._state.model_state = to_numpy(model_state)
-        self._state.last_is_done = np.array([False], dtype=bool) # never true again at run time
+        self._state.step_count += 1 #self._state.step_count + 1# never true again at run time
 
         return int(action.squeeze())

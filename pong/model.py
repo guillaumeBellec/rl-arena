@@ -77,11 +77,11 @@ class PongModel(RLModel):
         self.model_list = [self.cnn, self.policy_model, self.value_model]
         return
 
-    def forward(self, obs_array, done_array, last_action, model_state):
+    def forward(self, obs_array, step_counts, last_action, model_state):
         B, T, d, C, W, H = obs_array.shape
 
         obs_array = to_torch(obs_array) #.reshape(B, T, d, C, W, H) #.float() #
-        context = self.context_embedding(done_array, last_action)
+        context = self.context_embedding(step_counts, last_action)
         if self.player_index > 0:
             context += self.player_context_embedding.weight * torch.tensor(self.player_index) # TODO: add possibility for player 1,2
 

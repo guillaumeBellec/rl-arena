@@ -5,6 +5,7 @@ from datetime import datetime
 
 from pong.pong_env import preprocess_frame
 from rl_commons import AgentState, ObservationBuffer
+from utils import to_torch
 
 
 class Agent:
@@ -52,7 +53,7 @@ class Agent:
 
     def zero_state(self, batch_size):
         return AgentState(
-            last_is_done=np.array([True for _ in range(batch_size)]),
+            step_count=np.zeros(batch_size, dtype=np.int64),
             #last_obs_array= np.stack([np.zeros(self.model.observation_shape) for _ in range(batch_size)]),
             observation_buffer=ObservationBuffer.init(self.model.observation_shape,maxlen=self.model.n_observation_buffer, batch_size=batch_size, dtype=np.float32),
             extended_action_buffer=ObservationBuffer.init([], maxlen=self.model.n_observation_buffer, batch_size=batch_size, dtype=np.int64),
@@ -65,11 +66,14 @@ class Agent:
         I = self.preprocess_frame(observation) # downscale image !
         self.state.observation_buffer.add(I[None, ...])
 
-        last_done = self.state.last_is_done
-        obs_array = self.state.observation_buffer.numpy_stack()
-        action, _, _, final_model_state = self.model.action_selection(obs_array, last_done, self.state.model_state)
+        action, _, _, final_model_state = self.model.action_selection(
+            obs_array=self._state.observation_buffer.numpy_stack(),  # self._state.last_obs_array,
+            step_count=self._state.step_count,
+            last_extended_actions=self._state.extended_action_buffer.numpy_stack(),
+            model_state=self._state.model_state,
+        )
 
         self.state.extended_action_buffer.add(action.detach().cpu().numpy())
         self.state.model_state = final_model_state
-        self.state.last_is_done = np.array([False])
+        self.state.step_count += 1
         return int(action.squeeze().item())
